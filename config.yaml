@@ -1,3 +1,7 @@
+debug: false
+lag_time: 300
+lisent_addr: 0.0.0.0
+lisent_port: 1081
 local:
 - 127.0.0.1
 - localhost
@@ -13,5 +17,10 @@ local:
 proxy:
 - google.com
 - youtube.com
+- github.com
 - 8.8.8.8
 - 8.8.4.4
+proxy_addr: 127.0.0.1
+proxy_port: 1080
+reject: []
+route_timeout: 1800
