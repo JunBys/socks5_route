@@ -4,9 +4,9 @@ import threading
 import queue
 import time
 import logging
-import sys
 import yaml
 import os
+
 
 connect_cont = {"client_cont": 0, "server_vpn_cont": 0, 'server_con_cont': 0}
 # 日志格式
@@ -47,9 +47,8 @@ domain_fust = [
     "pro", "name", "museum", "coop", "aero", "xxx", "idv"
 ]
 
-def action_route(addr: str, src:str='none'):
-    # 处理路由表，当src='none'时，仅查询路由，否则应该为vpn/con, 用于记录路由
-    t = time.time()
+def parse_domain(addr:str):
+    # 将域名解析为短域名
     if addrtype == 0x03: # domain address
         addr_list = addr.split('.')
         addr_list.reverse()
@@ -60,6 +59,13 @@ def action_route(addr: str, src:str='none'):
             if i not in domain_fust:
                 addr = addr.strip('.')
                 break
+    return addr
+
+
+def action_route(addr: str, src:str='none'):
+    # 处理路由表，当src='none'时，仅查询路由，否则应该为vpn/con, 用于记录路由
+    t = time.time()
+    addr = parse_domain(addr)
     
     # 查询路由信息
     if src == 'none':
@@ -77,8 +83,8 @@ def action_route(addr: str, src:str='none'):
                         tm_x = time.time() - domain_route[addr][0][1]
                         if tm_x < route_timeout:
                             if debug == True:
-                                logging.info("%s: 路由：双路由记录默认: %s" % (addr, 'conn'))
-                            return 'con'
+                                logging.info("%s: 路由：两条路由不一致，重新竞争" % addr)
+                            return 'none'
             else:
                 # addr在路由表中，而且一条记录
                 if domain_route[addr][0][1] == 0:
@@ -101,6 +107,19 @@ def action_route(addr: str, src:str='none'):
             domain_route[addr].append([src, t])
             if debug == True:
                 logging.info("%s: 已提交到路由表" % addr)
+
+        elif len(domain_route[addr]) == 2:
+            if domain_route[addr][0][0] != domain_route[addr][1][0]:
+                tm1 = t - domain_route[addr][0][1]
+                tm2 = t - domain_route[addr][1][1]
+                if tm1 < route_timeout and tm2 < route_timeout:
+                    domain_route[addr] = [[src, t], [src, t]]
+                    if debug == True:
+                        logging.info("%s: 已提交到路由表" % addr)
+                    return
+                
+            domain_route[addr] = []
+            domain_route[addr].append([src, t])
 
         else:
             domain_route[addr] = []
@@ -135,7 +154,8 @@ def vpn_sync(client_socket, vpn_client_buff, addr, port, server_con_status, clie
             
         # 检查直连是否获得守帧数据
         if 'con' in competing:
-            logging.info('%s: 直连建立完成，不建立 vpn链路！' % addr)
+            if debug == True:
+                logging.info('%s: 直连建立完成，不建立 vpn链路！' % addr)
             return 
 
         if debug == True:
@@ -323,11 +343,64 @@ def con_sync(client_socket, con_client_buff, addr, port, server_con_status, clie
         connect_cont['server_con_cont'] = connect_cont['server_con_cont'] - 1
     server_socket.close()
 
+# # 广告屏蔽函数
+# def parse_adguard_rules(filename):
+#     rules = []
+#     buff = {}
+#     with open(filename, 'r') as f:
+#         for line in f:
+#             line = line.strip()
+#             # Ignore comments
+#             if line.startswith('!'):
+#                 continue
+#             # Handle exception rules
+#             if line.startswith('@@'):
+#                 line = line[2:]
+#                 exception = True
+#             else:
+#                 exception = False
+#             # Handle domain prefix rules
+#             if line.startswith('||'):
+#                 domain = line[2:].strip('^')
+#                 domain = '^' + domain
+#             # Handle domain suffix rules
+#             elif line.startswith('|'):
+#                 domain = line[1:].strip('^')
+#                 domain = domain + '$'
+#             elif line.startswith('@@||'):
+#                 domain = line[4:].strip('^')
+#                 domain = '^' + domain
+#             elif line.startswith('@@|'):
+#                 domain = line[3:].strip('^')
+#                 domain = domain + '$'
+
+#             domain = domain.replace('.', '\.').replace('*', '.*')
+#             rules.append({"pattern": re.compile(domain), "exception": exception})           
+#     return rules
+
+# buff = {}
+# def is_domain_blocked(domain):
+#     data = buff.get(domain)
+#     if data:
+#         return data
+    
+#     for ru in ad_rules:
+#         exception = ru['exception']
+#         pattern = ru['pattern']
+#         if exception:
+#             continue
+#         if pattern.match(domain):
+#             buff[domain] = True
+#             return True
+        
+#     buff[domain] = False
+#     return False
+
 
 # 建立客户端sockes连接
 def handle_client(client_socket):
     global addrtype
-
+    
     # 接收客户端请求
     request = client_socket.recv(4096)
     if not request:
@@ -382,6 +455,14 @@ def handle_client(client_socket):
         client_socket.close()
         return
     
+    # 如果目标在禁止的list中，关闭连接
+    if addr in reject_list:
+        if debug == True:
+            logging.warning('%s: url禁止连接' % addr)
+        client_socket.close()
+        return 
+
+    
     # 数据自动分流
     threads = []
     competing = []
@@ -422,7 +503,11 @@ def handle_client(client_socket):
     # 判断是否有至少一个线程成功连接到目标服务器
     scs_x = 0
     while True:
-        scs = server_con_status.get(timeout=60)
+        try:
+            scs = server_con_status.get(timeout=60)
+        except:
+            scs = False
+
         if scs == True:
             reply = b"\x05\x00\x00\x01"
             reply += socket.inet_aton(lisent_addr) + lisent_port.to_bytes(2, byteorder='big')
@@ -431,12 +516,24 @@ def handle_client(client_socket):
 
         if scs == False:
             scs_x = scs_x + 1
+
+            # 如果路由表存在addr，且连接失败，注销路由条目
+            if route_jg != 'none':
+                scs_x = 2
+                mini_addr = parse_domain(addr)
+                # 如果不是用户手动指定的路由表，清除路由条目
+                if domain_route[mini_addr][0][1] != 0:
+                    domain_route.pop(mini_addr)
+                    if debug == True:
+                        logging.error('%s: 连接失败，从路由表清除' % addr)
+
             if scs_x == 2:
                 # 服务器连接失败
-                client_socket.close()
                 if debug == True:
-                    logging.error('%s: 双路：服务器连接失败' % addr)
+                    logging.error('%s: 目标服务器连接失败，放弃' % addr)
                     connect_cont['client_cont'] = connect_cont['client_cont'] - 1
+
+                client_socket.close()
                 return 
     
     # 读取客户端数据，写入线程buff
@@ -489,57 +586,26 @@ def start_server():
             pass
 
 if __name__ == "__main__":
-    try:
-        sys.argv[2]
-    except:
-        print('\n%s  Lisent_Addr:Port  Proxy_Addr:Port  [debug|normal]  route_timeout[int] lag_time[int]' % sys.argv[0])
-        print("\tLisent_Addr:Port: 本地监听的socks5端口\n\tProxy_Addr:Port: 全局代理socks5")
-        print('\tdebug: 打印debug信息\n\troute_timeout: 路由表的路由信息超时时间:默认30分钟')
-        print('lag_time: 路由选择抢占测试时, vpn链路滞后启动时间默认1000ms\n')
-        exit()
-    
-    # 监听地址和端口
-    lisent = sys.argv[1].split(':')
-    lisent_addr = lisent[0]
-    lisent_port = int(lisent[1])
-
-    # 二级代理，仅支持socks5
-    proxy = sys.argv[2].split(':')
-    proxy_addr = proxy[0]
-    proxy_port = int(proxy[1])
-
-    # debug状态
-    if len(sys.argv) > 3:
-        if str(sys.argv[3]) == "debug":
-            debug = True
-        else:
-            debug = False
-    else:
-        debug = False
-
-    # 路由超时时间
-    if len(sys.argv) > 4:   
-        route_timeout = int(sys.argv[4])
-    else:
-        route_timeout = 1800
-
-    # 测试链接时vpn链路滞后时间，单位毫秒
-    lag_time_buff = queue.Queue()
-    if len(sys.argv) > 5:   
-        lag_time = int(sys.argv[5]) / 1000
-    else:
-        lag_time = 1
+    logging.info('正在启动...')
+    lag_time_buff = queue.Queue() 
 
     # 解析配置文件路由
     if os.path.exists('config.yaml') == False:
         config = {
+            "lisent_addr": "0.0.0.0",
+            "lisent_port": 1081,
+            "proxy_addr": "127.0.0.1",
+            "proxy_port": 1080,
+            "debug": False,
+            "route_timeout": 1800,
+            "lag_time": 300,
+            'reject': [],
             "local": [
                 '127.0.0.1', "localhost", '::1', '10.0.0.0',
                 '172.16.0.0', '192.168.0.0', '114.114.114.114', 
                 '119.29.29.29', '114.114.115.115', 'baidu.com', 'qq.com'
-                ], 
-
-            'proxy': ['google.com', 'youtube.com', '8.8.8.8', '8.8.4.4']
+            ], 
+            'proxy': ['google.com', 'youtube.com', 'github.com', '8.8.8.8', '8.8.4.4'],
         }
         with open('config.yaml', 'w') as f:
             f.write(yaml.safe_dump(config))
@@ -547,11 +613,37 @@ if __name__ == "__main__":
     with open('config.yaml', 'r') as f:
         config = yaml.safe_load(f.read())
 
+    # 导入配置
+    lisent_addr = config["lisent_addr"]
+    lisent_port = config["lisent_port"]
+    proxy_addr  = config["proxy_addr"]
+    proxy_port = config["proxy_port"]
+    debug = config["debug"]
+    route_timeout = config["route_timeout"]
+    lag_time = config["lag_time"] / 1000
+
+    # 导入静态路由
     for i in config['local']:
         domain_route[i] = [['con', 0]]
-    
     for i in config['proxy']:
         domain_route[i] = [['vpn', 0]]
 
+    # 禁止访问
+    reject_list = config['reject']
+    # # 导入广告信息
+    # if config['reject_mod'] == True:
+    #     
+        
+    #     if os.path.exists(config['reject_file'][0]) == False:
+    #         logging.info('从远程加载广告配置文件...')
+    #         import requests
+    #         r = requests.get(config['reject_file'][1])
+    #         respon = r.text
+    #         with open(config['reject_file'][0], 'w') as f:
+    #             f.write(respon)
+
+    # ad_rules = parse_adguard_rules(config['reject_file'][0])
+
+    logging.info("启动成功！")
     start_server()
 
