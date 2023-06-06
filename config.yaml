@@ -24,3 +24,8 @@ proxy_addr: 127.0.0.1
 proxy_port: 1080
 reject: []
 route_timeout: 1800
+static_dns:
+- 119.29.29.29
+- 114.114.114.114
+static_mode: true
+static_route_url: https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt
